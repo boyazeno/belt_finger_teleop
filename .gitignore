@@ -1,0 +1,25 @@
+# --- build / runtime artefacts ----------------------------------------------
+*.tar
+*.tar.gz
+*.log
+logs/
+build/
+install/
+log/
+
+
+# --- local overrides ---------------------------------------------------------
+.env.local
+compose.override.yaml
+Dockerfile.local
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+__pypackages__/
+
+# --- editors -----------------------------------------------------------------
+.vscode/
+*.swp

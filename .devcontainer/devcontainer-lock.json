@@ -1,0 +1,9 @@
+{
+  "features": {
+    "ghcr.io/althack/devcontainers/ros2:0": {
+      "version": "0.4.0",
+      "resolved": "ghcr.io/althack/devcontainers/ros2@sha256:12c557da727390efd7eee230b4082e97ffcfc88bef9d508767ace8435cf82f5e",
+      "integrity": "sha256:12c557da727390efd7eee230b4082e97ffcfc88bef9d508767ace8435cf82f5e"
+    }
+  }
+}

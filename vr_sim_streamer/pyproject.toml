@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vr_streamer"
+version = "0.1.0"
+description = "WebXR teleop + stereo viz for MuJoCo (drop-in library)."
+readme = "readme.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "aiortc>=1.9",
+    "aiofiles>=23.2",
+    "mujoco>=3.1",
+    "opencv-python>=4.9",
+    "numpy>=1.26",
+    "av>=11",
+]
+
+[project.scripts]
+vr-streamer-demo = "vr_streamer._demo_entry:run_demo"
+
+[tool.setuptools]
+packages = ["vr_streamer"]
+
+[tool.setuptools.package-data]
+vr_streamer = ["static/*.html", "static/*.js", "static/*.css", "scene.xml"]

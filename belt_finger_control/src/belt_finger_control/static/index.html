@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>belt_finger_control — VR teleop</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #111; color: #ddd; font-family: system-ui, sans-serif; height: 100%; }
+  #ui { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 10; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { font-size: 1rem; padding: 0.6rem 1rem; background: #2c5; border: 0; border-radius: 6px; color: #000; cursor: pointer; }
+  button:disabled { background: #444; color: #888; cursor: not-allowed; }
+  #log { background: #000a; color: #6f6; padding: 6px 8px; height: 140px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 12px; border-radius: 4px; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div class="row">
+    <button id="connect">Connect</button>
+    <button id="enterXR" disabled>Enter XR</button>
+    <span id="status">idle</span>
+  </div>
+  <div id="log"></div>
+</div>
+
+<script type="module">
+// belt_finger_control VR teleop client.
+//
+// Streams Quest headset + controller poses and button state to the PC over a
+// WebRTC DataChannel ('pose'). No sim video is displayed — this page only
+// captures input. Two modes (selected via ?mode= query param, set by the
+// Python VRModeDetector):
+//   ?mode=ar  -> immersive-ar: Quest 3s passthrough, see the real robot.
+//   ?mode=vr  -> immersive-vr: rendering stripped, headset can sit on the
+//                neck while the active session keeps the screen awake.
+
+const params = new URLSearchParams(location.search);
+const xrMode = params.get('mode') === 'vr' ? 'immersive-vr' : 'immersive-ar';
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const log = (s) => { logEl.textContent += s + '\n'; logEl.scrollTop = logEl.scrollHeight; console.log(s); };
+const setStatus = (s) => { statusEl.textContent = s; };
+log('mode: ' + xrMode);
+
+// ---------- WebRTC ----------
+
+let pc = null;
+let poseChannel = null;
+
+async function connect() {
+  pc = new RTCPeerConnection({
+    //iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: [],
+  });
+  pc.onconnectionstatechange = () => { setStatus('pc:' + pc.connectionState); log('pc state ' + pc.connectionState); };
+
+  // The server always addTrack()s a (black) video track; keep a recvonly
+  // transceiver so SDP negotiation stays clean. We never display it.
+  pc.addTransceiver('video', { direction: 'recvonly' });
+
+  poseChannel = pc.createDataChannel('pose', { ordered: false, maxRetransmits: 0 });
+  poseChannel.onopen = () => { log('pose channel open'); document.getElementById('enterXR').disabled = false; };
+  poseChannel.onclose = () => log('pose channel closed');
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // Wait for ICE gathering (no trickle).
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', check);
+  });
+
+  const resp = await fetch('/offer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+  });
+  const answer = await resp.json();
+  await pc.setRemoteDescription(answer);
+  log('signaling complete');
+
+  // Keep the headset display awake (belt-and-suspenders for neck-wear mode).
+  try {
+    if (navigator.wakeLock) await navigator.wakeLock.request('screen');
+  } catch (e) { log('wakeLock err ' + e); }
+}
+
+document.getElementById('connect').onclick = () => {
+  document.getElementById('connect').disabled = true;
+  connect().catch(e => { log('connect err: ' + e); document.getElementById('connect').disabled = false; });
+};
+
+// ---------- Pose streaming ----------
+
+let referenceSpace = null;
+let xrSession = null;
+let gl = null;
+
+function poseToArrays(p) {
+  return {
+    pos: [p.position.x, p.position.y, p.position.z],
+    quat: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w],
+  };
+}
+
+// Quest button mapping for the standard XR controller profile:
+//   buttons[0] = trigger, buttons[1] = squeeze/grip, buttons[3] = thumbstick click,
+//   buttons[4] = A/X, buttons[5] = B/Y. axes[2..3] = thumbstick x/y.
+function readGamepad(gp) {
+  if (!gp) return null;
+  const btn = (i) => gp.buttons[i] ? { pressed: gp.buttons[i].pressed, value: gp.buttons[i].value } : null;
+  return {
+    trigger: btn(0),
+    squeeze: btn(1),
+    thumbstick: btn(3),
+    a: btn(4),
+    b: btn(5),
+    axes: gp.axes ? Array.from(gp.axes) : [],
+  };
+}
+
+function readController(frame, src) {
+  if (!src.gripSpace) return null;
+  const pose = frame.getPose(src.gripSpace, referenceSpace);
+  if (!pose) return null;
+  return {
+    kind: 'controller',
+    ...poseToArrays(pose.transform),
+    buttons: readGamepad(src.gamepad),
+    profiles: src.profiles,
+  };
+}
+
+function sendPose(frame) {
+  if (!poseChannel || poseChannel.readyState !== 'open' || !referenceSpace) return;
+  const viewerPose = frame.getViewerPose(referenceSpace);
+  if (!viewerPose) return;
+
+  const msg = { t: performance.now(), head: poseToArrays(viewerPose.transform) };
+
+  for (const src of xrSession.inputSources) {
+    const hand = src.handedness === 'left' ? 'left' : (src.handedness === 'right' ? 'right' : null);
+    if (!hand) continue;
+    const payload = readController(frame, src);
+    if (payload) msg[hand] = payload;
+  }
+  try {
+    poseChannel.send(JSON.stringify(msg));
+  } catch (_) { /* channel may have just closed */ }
+}
+
+async function enterXR() {
+  if (!window.isSecureContext) {
+    log('WebXR requires a secure context. Use HTTPS or http://localhost.');
+    return;
+  }
+  if (!navigator.xr) { log('WebXR not supported in this browser'); return; }
+  const supported = await navigator.xr.isSessionSupported(xrMode);
+  if (!supported) { log(xrMode + ' not supported'); return; }
+
+  const session = await navigator.xr.requestSession(xrMode, {
+    optionalFeatures: ['local-floor', 'bounded-floor'],
+  });
+  xrSession = session;
+
+  // Minimal WebGL layer: required for an immersive session even though we
+  // render nothing. In AR the passthrough shows through; in VR it stays black.
+  const canvas = document.createElement('canvas');
+  gl = canvas.getContext('webgl', { xrCompatible: true, alpha: true });
+  await gl.makeXRCompatible();
+  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+  referenceSpace = await session.requestReferenceSpace('local-floor').catch(
+    () => session.requestReferenceSpace('local'));
+
+  log('XR session active');
+  setStatus('XR active');
+
+  const onFrame = (time, frame) => {
+    if (!xrSession) return;
+    xrSession.requestAnimationFrame(onFrame);
+    if (!frame) return;
+    sendPose(frame);
+    // Render nothing — clear transparent so AR passthrough is visible.
+    const layer = xrSession.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  };
+  session.requestAnimationFrame(onFrame);
+
+  session.addEventListener('end', () => {
+    log('XR session ended');
+    setStatus('idle');
+    referenceSpace = null;
+    xrSession = null;
+  });
+}
+
+document.getElementById('enterXR').onclick = () => {
+  enterXR().catch(e => log('enterXR err: ' + e));
+};
+</script>
+</body>
+</html>

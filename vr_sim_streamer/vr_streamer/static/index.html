@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>VR Sim Streamer</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #111; color: #ddd; font-family: system-ui, sans-serif; height: 100%; }
+  #ui { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 10; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { font-size: 1rem; padding: 0.6rem 1rem; background: #2c5; border: 0; border-radius: 6px; color: #000; cursor: pointer; }
+  button:disabled { background: #444; color: #888; cursor: not-allowed; }
+  #log { background: #000a; color: #6f6; padding: 6px 8px; height: 110px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; font-size: 12px; border-radius: 4px; }
+  #preview { position: fixed; bottom: 8px; right: 8px; width: 320px; height: 120px; background: #000; border: 1px solid #333; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div class="row">
+    <button id="connect">Connect</button>
+    <button id="enterVR" disabled>Enter VR</button>
+    <span id="status">idle</span>
+  </div>
+  <div id="log"></div>
+</div>
+<video id="preview" autoplay playsinline muted></video>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const log = (s) => { logEl.textContent += s + '\n'; logEl.scrollTop = logEl.scrollHeight; console.log(s); };
+const setStatus = (s) => { statusEl.textContent = s; };
+
+// ---------- WebRTC ----------
+
+let pc = null;
+let poseChannel = null;
+let videoEl = document.getElementById('preview');
+
+async function connect() {
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  });
+  pc.onconnectionstatechange = () => { setStatus('pc:' + pc.connectionState); log('pc state ' + pc.connectionState); };
+
+  // Receive the server's stereo video track.
+  pc.addTransceiver('video', { direction: 'recvonly' });
+
+  pc.ontrack = (ev) => {
+    log('ontrack ' + ev.track.kind);
+    if (ev.track.kind === 'video') {
+      videoEl.srcObject = ev.streams[0];
+      videoEl.play().catch(e => log('video play err ' + e));
+    }
+  };
+
+  poseChannel = pc.createDataChannel('pose', { ordered: false, maxRetransmits: 0 });
+  poseChannel.onopen = () => { log('pose channel open'); document.getElementById('enterVR').disabled = false; };
+  poseChannel.onclose = () => log('pose channel closed');
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // Wait for ICE gathering (no trickle).
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', check);
+  });
+
+  const resp = await fetch('/offer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+  });
+  const answer = await resp.json();
+  await pc.setRemoteDescription(answer);
+  log('signaling complete');
+}
+
+document.getElementById('connect').onclick = () => {
+  document.getElementById('connect').disabled = true;
+  connect().catch(e => { log('connect err: ' + e); document.getElementById('connect').disabled = false; });
+};
+
+// ---------- Three.js stereoscopic display ----------
+//
+// Strategy: hide a single SBS <video> texture, then put two textured planes
+// in front of the camera — one on layer 1 (left eye only), one on layer 2
+// (right eye only). The WebXR ArrayCamera's two sub-cameras have their layers
+// configured per-eye in the render loop, so each eye sees only its half of
+// the SBS texture.
+
+const scene = new THREE.Scene();
+
+// The video texture is created once the video element actually has data.
+// We use a placeholder texture until then so the planes always have a map.
+const placeholderTex = new THREE.DataTexture(new Uint8Array([20, 20, 30, 255]), 1, 1, THREE.RGBAFormat);
+placeholderTex.needsUpdate = true;
+
+const videoTex = new THREE.VideoTexture(videoEl);
+videoTex.colorSpace = THREE.SRGBColorSpace;
+videoTex.minFilter = THREE.LinearFilter;
+videoTex.magFilter = THREE.LinearFilter;
+videoTex.generateMipmaps = false;
+
+// Build two planes covering the eye view. We place them at z = -1 (in head
+// space), sized roughly to the camera FOV.
+function makeEyePlane(uOffset) {
+  // Each plane's UVs span only [uOffset, uOffset+0.5] horizontally.
+  const geo = new THREE.PlaneGeometry(2, 2);
+  const uv = geo.attributes.uv.array;
+  // PlaneGeometry uv order (THREE): TL, TR, BL, BR -> u: 0,1,0,1; v: 1,1,0,0
+  for (let i = 0; i < uv.length; i += 2) {
+    uv[i] = uOffset + uv[i] * 0.5;
+  }
+  geo.attributes.uv.needsUpdate = true;
+  const mat = new THREE.MeshBasicMaterial({ map: videoTex, depthTest: false, depthWrite: false });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+const leftPlane = makeEyePlane(0.0);
+const rightPlane = makeEyePlane(0.5);
+leftPlane.layers.set(1);
+rightPlane.layers.set(2);
+// We want the plane to follow the head; we attach to a holder that we
+// reposition each frame from the XR camera transform.
+const screenHolder = new THREE.Group();
+screenHolder.add(leftPlane);
+screenHolder.add(rightPlane);
+// Push the planes 1m in front of the holder.
+leftPlane.position.set(0, 0, -1.2);
+rightPlane.position.set(0, 0, -1.2);
+scene.add(screenHolder);
+
+// Renderer: created on demand when entering XR (Quest browser disallows
+// xr.setSession until a user gesture, so we wire it from the button).
+let renderer = null;
+let xrCanvas = null;
+
+function ensureRenderer() {
+  if (renderer) return renderer;
+  xrCanvas = document.createElement('canvas');
+  xrCanvas.style.position = 'fixed';
+  xrCanvas.style.inset = '0';
+  xrCanvas.style.width = '100%';
+  xrCanvas.style.height = '100%';
+  xrCanvas.style.zIndex = '1';
+  document.body.appendChild(xrCanvas);
+  renderer = new THREE.WebGLRenderer({ canvas: xrCanvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.xr.enabled = true;
+  return renderer;
+}
+
+// ---------- Pose streaming ----------
+
+let referenceSpace = null;
+let xrSession = null;
+
+function poseToArrays(p) {
+  return {
+    pos: [p.position.x, p.position.y, p.position.z],
+    quat: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w],
+  };
+}
+
+// Quest button mapping for the standard XR controller profile:
+//   buttons[0] = trigger, buttons[1] = squeeze/grip, buttons[3] = thumbstick click,
+//   buttons[4] = A/X, buttons[5] = B/Y. axes[2..3] = thumbstick x/y.
+function readGamepad(gp) {
+  if (!gp) return null;
+  const btn = (i) => gp.buttons[i] ? { pressed: gp.buttons[i].pressed, value: gp.buttons[i].value } : null;
+  return {
+    trigger: btn(0),
+    squeeze: btn(1),
+    thumbstick: btn(3),
+    a: btn(4),
+    b: btn(5),
+    axes: gp.axes ? Array.from(gp.axes) : [],
+  };
+}
+
+function readHand(frame, src) {
+  if (!src.hand) return null;
+  const wristJoint = src.hand.get('wrist');
+  if (!wristJoint) return null;
+  const wristPose = frame.getJointPose(wristJoint, referenceSpace);
+  if (!wristPose) return null;
+  const data = { kind: 'hand', ...poseToArrays(wristPose.transform) };
+
+  // Pinch strength from thumb-tip <-> index-tip distance.
+  const tip1 = src.hand.get('thumb-tip');
+  const tip2 = src.hand.get('index-finger-tip');
+  if (tip1 && tip2) {
+    const a = frame.getJointPose(tip1, referenceSpace);
+    const b = frame.getJointPose(tip2, referenceSpace);
+    if (a && b) {
+      const dx = a.transform.position.x - b.transform.position.x;
+      const dy = a.transform.position.y - b.transform.position.y;
+      const dz = a.transform.position.z - b.transform.position.z;
+      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      // Map 4cm (open) -> 0, 1.5cm (closed) -> 1.
+      const pinch = Math.max(0, Math.min(1, (0.04 - dist) / (0.04 - 0.015)));
+      data.pinch = { value: pinch, pressed: pinch > 0.85, distance: dist };
+    }
+  }
+  return data;
+}
+
+function readController(frame, src) {
+  if (!src.gripSpace) return null;
+  const pose = frame.getPose(src.gripSpace, referenceSpace);
+  if (!pose) return null;
+  return {
+    kind: 'controller',
+    ...poseToArrays(pose.transform),
+    buttons: readGamepad(src.gamepad),
+    profiles: src.profiles,
+  };
+}
+
+function sendPose(frame) {
+  if (!poseChannel || poseChannel.readyState !== 'open' || !referenceSpace) return;
+  const viewerPose = frame.getViewerPose(referenceSpace);
+  if (!viewerPose) return;
+
+  const msg = { t: performance.now(), head: poseToArrays(viewerPose.transform) };
+
+  for (const src of xrSession.inputSources) {
+    const hand = src.handedness === 'left' ? 'left' : (src.handedness === 'right' ? 'right' : null);
+    if (!hand) continue;
+    // Prefer hand tracking when present; fall back to controller.
+    const payload = src.hand ? readHand(frame, src) : readController(frame, src);
+    if (payload) msg[hand] = payload;
+  }
+  try {
+    poseChannel.send(JSON.stringify(msg));
+  } catch (_) { /* channel may have just closed */ }
+}
+
+async function enterVR() {
+  if (!window.isSecureContext) {
+    log('WebXR requires a secure context. Use HTTPS or http://localhost (try `adb reverse tcp:8000 tcp:8000`).');
+    return;
+  }
+  if (!navigator.xr) { log('WebXR not supported in this browser'); return; }
+  const supported = await navigator.xr.isSessionSupported('immersive-vr');
+  if (!supported) { log('immersive-vr not supported'); return; }
+
+  ensureRenderer();
+  const session = await navigator.xr.requestSession('immersive-vr', {
+    optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+  });
+  xrSession = session;
+  await renderer.xr.setSession(session);
+  referenceSpace = await session.requestReferenceSpace('local-floor').catch(
+    () => session.requestReferenceSpace('local'));
+
+  log('XR session active');
+  setStatus('XR active');
+
+  renderer.setAnimationLoop((time, frame) => {
+    if (!frame) return;
+    sendPose(frame);
+
+    // Configure ArrayCamera so each sub-camera sees only its eye plane.
+    const xrCam = renderer.xr.getCamera();
+    if (xrCam.cameras && xrCam.cameras.length === 2) {
+      xrCam.cameras[0].layers.disableAll();
+      xrCam.cameras[0].layers.enable(1);
+      xrCam.cameras[1].layers.disableAll();
+      xrCam.cameras[1].layers.enable(2);
+    }
+    // Anchor the screen holder to the head pose so the planes stay in front.
+    const headMatrix = xrCam.matrixWorld;
+    screenHolder.matrix.copy(headMatrix);
+    screenHolder.matrixAutoUpdate = false;
+    screenHolder.matrixWorldNeedsUpdate = true;
+
+    renderer.render(scene, xrCam);
+  });
+
+  session.addEventListener('end', () => {
+    log('XR session ended');
+    setStatus('idle');
+    renderer.setAnimationLoop(null);
+    referenceSpace = null;
+    xrSession = null;
+  });
+}
+
+document.getElementById('enterVR').onclick = () => {
+  enterVR().catch(e => log('enterVR err: ' + e));
+};
+</script>
+</body>
+</html>

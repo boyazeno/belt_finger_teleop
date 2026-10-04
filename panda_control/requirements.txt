@@ -1,0 +1,11 @@
+dynamixel_sdk
+matplotlib
+numpy==2.2.6
+opencv_python
+panda_ikfast==0.0.1
+pillow==11.0.0
+pyrealsense2==2.56.5.9235
+pytransform3d==3.14.2
+pyzmq==27.0.1
+setuptools==80.10.2
+protobuf==3.20.0

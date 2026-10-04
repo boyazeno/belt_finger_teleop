@@ -1,0 +1,51 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "start_robot",
+            "type": "shell",
+            "command": "cd ~/ws/3rd_party_libs/deoxys_control/deoxys && auto_scripts/auto_arm.sh /root/ws/3rd_party_libs/panda_control/config/charmander.yml /root/ws/3rd_party_libs/panda_control/config/control_config.yml",
+            "presentation": {
+                "group": "servers",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "start_gripper",
+            "type": "shell",
+            "command": "cd ~/ws/3rd_party_libs/deoxys_control/deoxys && auto_scripts/auto_gripper.sh /root/ws/3rd_party_libs/panda_control/config/charmander.yml /root/ws/3rd_party_libs/panda_control/config/control_config.yml",
+            "presentation": {
+                "group": "servers",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "start_vpn",
+            "type": "shell",
+            "command": "gnirehtet run",
+            "presentation": {
+                "group": "servers",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "start_recording",
+            "type": "shell",
+            "command": "cd /root/ws/3rd_party_libs/belt_finger_control/scripts && python3 record_counterfactual_dataset_vr_franka_gripper.py",
+            "presentation": {
+                "group": "servers",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Run All Servers",
+            "dependsOn": [
+                "start_robot",
+                "start_gripper",
+                "start_vpn",
+            ],
+            "dependsOrder": "parallel",
+            "problemMatcher": []
+        }
+    ]
+}
