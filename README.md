@@ -1,4 +1,4 @@
-# panda_teleop_docker
+# belt_finger_teleop
 
 # How-To:
 
